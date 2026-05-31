@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Substack PDF Archiver</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#272b34; --fg:#e8eaed; --muted:#9aa0aa;
+          --accent:#ff6719; --ok:#46c46a; --warn:#e5a13a; --err:#ef5350; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         background:var(--bg); color:var(--fg); display:flex; justify-content:center; padding:32px 16px; }
+  .wrap { width:100%; max-width:760px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:18px; }
+  label { display:block; font-size:13px; color:var(--muted); margin-bottom:6px; }
+  input[type=text], input[type=date] {
+    width:100%; padding:10px 12px; background:#0e1014; border:1px solid var(--line);
+    border-radius:8px; color:var(--fg); font-size:14px; }
+  input:disabled { opacity:.4; }
+  .row { display:flex; gap:14px; }
+  .row > div { flex:1; }
+  .checkbox { display:flex; align-items:center; gap:8px; margin:14px 0 4px; color:var(--fg); }
+  .checkbox input { width:16px; height:16px; accent-color:var(--accent); }
+  button { font:inherit; font-weight:600; border:none; border-radius:8px; padding:11px 18px; cursor:pointer; }
+  .primary { background:var(--accent); color:#fff; }
+  .primary:disabled { opacity:.5; cursor:not-allowed; }
+  .ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  .danger { background:transparent; color:var(--err); border:1px solid var(--err); }
+  .actions { display:flex; gap:10px; align-items:center; margin-top:16px; }
+  .status { font-size:13px; padding:6px 10px; border-radius:6px; }
+  .status.ok { color:var(--ok); } .status.bad { color:var(--warn); }
+  #log { background:#0b0d10; border:1px solid var(--line); border-radius:8px; padding:14px;
+         height:320px; overflow:auto; font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+         white-space:pre-wrap; word-break:break-word; }
+  #log .ok{color:var(--ok)} #log .err{color:var(--err)} #log .skip{color:var(--muted)}
+  #log .warn{color:var(--warn)} #log .info{color:var(--fg)}
+  .hint { color:var(--muted); font-size:12.5px; margin-top:6px; }
+  .summary { margin-top:12px; font-weight:600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Substack PDF Archiver</h1>
+  <p class="sub">Save a paid publication's posts as pixel-perfect PDFs, named by date.</p>
+
+  <div class="card">
+    <div class="actions" style="margin-top:0">
+      <button id="loginBtn" class="ghost">Connect Substack account</button>
+      <span id="sessionStatus" class="status">checking…</span>
+    </div>
+    <p class="hint" id="loginHint">One login covers every publication you subscribe to.</p>
+  </div>
+
+  <div class="card">
+    <label for="pub">Publication URL</label>
+    <input id="pub" type="text" placeholder="https://example.substack.com  (or just the slug)" />
+
+    <label class="checkbox"><input id="allBox" type="checkbox" checked /> Download all posts</label>
+
+    <div class="row" id="dateRow" style="margin-top:10px">
+      <div>
+        <label for="since">From (oldest)</label>
+        <input id="since" type="date" disabled />
+      </div>
+      <div>
+        <label for="until">To (newest)</label>
+        <input id="until" type="date" disabled />
+      </div>
+    </div>
+    <p class="hint">Leave “Download all posts” checked to grab everything, or uncheck it to pick a date range. Already-downloaded PDFs are skipped automatically.</p>
+
+    <div class="actions">
+      <button id="goBtn" class="primary">Download</button>
+      <button id="stopBtn" class="danger" style="display:none">Stop</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>Progress</label>
+    <div id="log"></div>
+    <div id="summary" class="summary"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+let es = null;
+
+function addLine(text) {
+  const div = document.createElement("div");
+  let cls = "info";
+  if (text.startsWith("✓")) cls = "ok";
+  else if (text.startsWith("✗")) cls = "err";
+  else if (text.startsWith("↷")) cls = "skip";
+  else if (text.startsWith("…") || text.startsWith("■")) cls = "warn";
+  div.className = cls;
+  div.textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ── Session status ──
+async function refreshSession() {
+  const r = await fetch("/api/session").then((x) => x.json());
+  const s = $("sessionStatus");
+  if (r.ready) { s.textContent = "● session ready"; s.className = "status ok"; }
+  else { s.textContent = "● not connected"; s.className = "status bad"; }
+}
+
+// ── Login flow ──
+$("loginBtn").onclick = async () => {
+  const btn = $("loginBtn");
+  btn.disabled = true; btn.textContent = "Opening browser…";
+  const start = await fetch("/api/login/start", { method: "POST" }).then((r) => r.json());
+  if (start.error) { alert("Login error: " + start.error); btn.disabled = false; btn.textContent = "Connect Substack account"; return; }
+  btn.textContent = "Sign in, then click “I'm signed in”";
+  $("loginHint").textContent = "A browser window opened. Log into Substack there, then click the button.";
+  btn.onclick = async () => {
+    btn.disabled = true; btn.textContent = "Saving session…";
+    const fin = await fetch("/api/login/finish", { method: "POST" }).then((r) => r.json());
+    if (fin.error) alert("Could not save session: " + fin.error);
+    await refreshSession();
+    btn.disabled = false; btn.textContent = "Connect Substack account";
+    $("loginHint").textContent = "One login covers every publication you subscribe to.";
+    location.reload();
+  };
+  btn.disabled = false; btn.textContent = "I'm signed in";
+};
+
+// ── Date range toggle ──
+$("allBox").onchange = (e) => {
+  const off = e.target.checked;
+  $("since").disabled = off; $("until").disabled = off;
+};
+
+// ── Run / stop ──
+function setRunning(on) {
+  $("goBtn").style.display = on ? "none" : "inline-block";
+  $("stopBtn").style.display = on ? "inline-block" : "none";
+  $("pub").disabled = on; $("allBox").disabled = on;
+  $("since").disabled = on || $("allBox").checked;
+  $("until").disabled = on || $("allBox").checked;
+}
+
+$("goBtn").onclick = () => {
+  const pub = $("pub").value.trim();
+  if (!pub) { alert("Enter a publication URL."); return; }
+  const all = $("allBox").checked;
+  const params = new URLSearchParams({ publication: pub, all: String(all) });
+  if (!all) {
+    if ($("since").value) params.set("since", $("since").value);
+    if ($("until").value) params.set("until", $("until").value);
+  }
+  logEl.innerHTML = ""; $("summary").textContent = "";
+  setRunning(true);
+  es = new EventSource("/api/archive?" + params.toString());
+  es.addEventListener("log", (e) => addLine(JSON.parse(e.data)));
+  es.addEventListener("done", (e) => {
+    const s = JSON.parse(e.data);
+    $("summary").textContent = `✓ ${s.saved} saved · ${s.skipped} skipped · ${s.failed} failed → ${s.outputDir}/`;
+    es.close(); setRunning(false);
+  });
+  es.addEventListener("error", (e) => {
+    const msg = e.data ? JSON.parse(e.data) : "Connection lost.";
+    addLine("✗ " + msg);
+    es.close(); setRunning(false);
+  });
+};
+
+$("stopBtn").onclick = () => {
+  if (es) es.close();   // closing the SSE connection signals the server to abort
+  addLine("■ Stopping…");
+  setRunning(false);
+};
+
+refreshSession();
+</script>
+</body>
+</html>

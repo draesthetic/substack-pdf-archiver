@@ -1,0 +1,15 @@
+{
+  "name": "substack-pdf-archiver",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bulk-archive a Substack publication's posts as pixel-perfect PDFs (personal use).",
+  "scripts": {
+    "login": "node login.js",
+    "archive": "node archive.js",
+    "dashboard": "node server.js"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

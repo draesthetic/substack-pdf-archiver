@@ -1,0 +1,4 @@
+node_modules/
+storageState.json
+pdfs/
+.DS_Store
