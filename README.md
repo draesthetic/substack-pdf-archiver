@@ -4,6 +4,11 @@ Bulk-saves a Substack publication's posts as **pixel-perfect PDFs**, named
 `YYYY-MM-DD – Title.pdf` so the folder sorts chronologically. For personal,
 offline archival of publications **you have a paid subscription to**.
 
+> ⚠️ **Personal use only.** This tool is for making offline backups of content
+> you legitimately pay for. Do not use it to redistribute, share, or republish
+> paywalled posts, and respect each publication's terms of service. You are
+> responsible for how you use it.
+
 ## Setup
 
 ```bash
