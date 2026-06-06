@@ -38,21 +38,91 @@ const renderPost = async (page, url, filepath) => {
     .waitForSelector("article, .available-content, .single-post, .post", { timeout: 30000 })
     .catch(() => {});
   await page.emulateMedia({ media: "screen" });
+
+  // Two print problems are fixed here with one injected stylesheet:
+  //
+  // 1. Sliced figures. `break-inside: avoid` are CSS fragmentation rules,
+  //    honored while Chromium paginates the PDF, so an image/figure/code block
+  //    is moved whole to the next page instead of being cut across the break.
+  //    They are intentionally NOT wrapped in @media print — we emulate "screen"
+  //    above, so an @media print block would never match.
+  //
+  // 2. The repeating top bar. Substack pins its nav with `position: fixed`, and
+  //    Chromium repaints fixed elements on EVERY printed page, so the bar landed
+  //    on top of (and clipped) the first line of every continuation page.
+  //    Demoting it to static makes it flow once, at the top. We do this in CSS
+  //    (not just inline JS) because Substack is a React app that re-renders and
+  //    restores inline styles — an injected stylesheet rule survives that.
+  await page
+    .addStyleTag({
+      content: `
+        img, figure, picture, svg, video, .captioned-image-container,
+        pre, blockquote, table, tr, .subscription-widget-wrap {
+          break-inside: avoid !important;
+          page-break-inside: avoid !important;
+        }
+        h1, h2, h3, h4, h5, h6 {
+          break-after: avoid !important;
+          page-break-after: avoid !important;
+        }
+        [class*="mainMenuContent"], .pc-position-fixed {
+          position: static !important;
+        }
+      `,
+    })
+    .catch(() => {});
+
+  // Scroll the whole article so lazy images start loading. Re-read the real page
+  // height each pass (it grows as images appear) and walk by actual scroll
+  // position — not a fixed counter — stopping once the bottom stops moving.
+  // Bounded by `passes` so a page whose height never settles can't loop forever.
   await page.evaluate(async () => {
-    await new Promise((resolve) => {
-      let y = 0;
-      const step = () => {
-        window.scrollBy(0, window.innerHeight);
-        y += window.innerHeight;
-        if (y < document.body.scrollHeight) setTimeout(step, 200);
-        else resolve();
-      };
-      step();
-    });
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const docHeight = () =>
+      Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+    let last = -1, stable = 0, passes = 0;
+    while (stable < 2 && passes < 6) {
+      const before = docHeight();
+      for (let y = 0; y < before; y += Math.round(window.innerHeight * 0.85)) {
+        window.scrollTo(0, y);
+        await sleep(120);
+      }
+      window.scrollTo(0, docHeight());
+      await sleep(300);
+      const after = docHeight();
+      stable = after === last ? stable + 1 : 0;
+      last = after;
+      passes++;
+    }
   });
+
+  // Now that everything has been scrolled into view, wait for each image to
+  // finish (img.complete is also true on error, so a broken image can't hang
+  // us) and best-effort decode, so final heights are settled before we
+  // paginate. A half-loaded image is what throws the page breaks off.
+  await page
+    .waitForFunction(() => Array.from(document.images).every((img) => img.complete), {
+      timeout: 15000,
+    })
+    .catch(() => {});
+  await page
+    .evaluate(() => Promise.allSettled(Array.from(document.images).map((img) => img.decode?.())))
+    .catch(() => {});
+
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForLoadState("load").catch(() => {});
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(800);
+
+  // Catch-all for any other fixed/sticky element the stylesheet rule above
+  // didn't name (floating share bars, toasts, …) so they don't repeat on every
+  // page. Done as the very last step before printing: any earlier and a React
+  // re-render during the waits could restore them.
+  await page.evaluate(() => {
+    for (const el of document.querySelectorAll("*")) {
+      const pos = getComputedStyle(el).position;
+      if (pos === "fixed" || pos === "sticky") el.style.setProperty("position", "static", "important");
+    }
+  });
 
   await page.pdf({
     path: filepath,
