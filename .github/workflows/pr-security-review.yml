@@ -1,0 +1,238 @@
+name: PR Security & Bug Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: pr-security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Observation mode ends after seven days. A separate rollout task will then
+  # require the security-gate check on the default branch.
+  ENFORCE_AFTER: "2026-07-31T08:15:10Z"
+  SEMGREP_SEND_METRICS: "off"
+
+jobs:
+  scan:
+    name: Static vulnerability and bug scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      blocking_findings: ${{ steps.summarize.outputs.blocking_findings }}
+      summary: ${{ steps.summarize.outputs.summary }}
+      scan_ok: ${{ steps.summarize.outputs.scan_ok }}
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        run: python -m pip install --disable-pip-version-check "semgrep==1.171.0"
+
+      - name: Run Semgrep security and correctness rules
+        id: semgrep
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          semgrep scan \
+            --config p/default \
+            --config p/security-audit \
+            --exclude .git \
+            --exclude node_modules \
+            --exclude .venv \
+            --exclude dist \
+            --exclude build \
+            --json --output semgrep.json .
+          rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          test -f semgrep.json || printf '%s\n' '{"results":[],"errors":[{"message":"Semgrep did not produce a report"}]}' > semgrep.json
+          exit 0
+
+      - name: Run Trivy dependency, secret, and misconfiguration scan
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: json
+          output: trivy.json
+          exit-code: "0"
+
+      - name: Summarize findings
+        id: summarize
+        if: always()
+        env:
+          SEMGREP_EXIT: ${{ steps.semgrep.outputs.exit_code }}
+          TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def load(path, fallback):
+              try:
+                  return json.loads(Path(path).read_text())
+              except Exception:
+                  return fallback
+
+          semgrep = load("semgrep.json", {"results": [], "errors": [{"message": "Unreadable Semgrep report"}]})
+          trivy = load("trivy.json", {"Results": []})
+
+          semgrep_results = semgrep.get("results") or []
+          semgrep_blocking = [
+              item for item in semgrep_results
+              if str((item.get("extra") or {}).get("severity", "")).upper() == "ERROR"
+          ]
+
+          trivy_findings = []
+          for result in trivy.get("Results") or []:
+              target = result.get("Target", "unknown")
+              for key in ("Vulnerabilities", "Misconfigurations", "Secrets"):
+                  for item in result.get(key) or []:
+                      severity = str(item.get("Severity", "UNKNOWN")).upper()
+                      if severity in {"HIGH", "CRITICAL"}:
+                          trivy_findings.append((target, key, item))
+
+          scanner_errors = []
+          if os.environ.get("SEMGREP_EXIT", "0") not in {"", "0", "1"}:
+              scanner_errors.append(f"Semgrep exited {os.environ.get('SEMGREP_EXIT')}")
+          if os.environ.get("TRIVY_OUTCOME") != "success":
+              scanner_errors.append(f"Trivy outcome: {os.environ.get('TRIVY_OUTCOME', 'unknown')}")
+          if semgrep.get("errors"):
+              scanner_errors.append(f"Semgrep reported {len(semgrep['errors'])} engine error(s)")
+
+          total = len(semgrep_blocking) + len(trivy_findings)
+          lines = [
+              "<!-- hermes-pr-security-review -->",
+              "## 🔐 PR security & bug review",
+              "",
+              f"**Blocking-severity findings:** {total} "
+              f"(Semgrep: {len(semgrep_blocking)}, Trivy: {len(trivy_findings)})",
+          ]
+          if scanner_errors:
+              lines += ["", "### Scanner health", *[f"- ⚠️ {x}" for x in scanner_errors]]
+          if semgrep_blocking:
+              lines += ["", "### Semgrep — security/correctness errors"]
+              for item in semgrep_blocking[:20]:
+                  extra = item.get("extra") or {}
+                  message = " ".join(str(extra.get("message", "Finding")).split())
+                  lines.append(f"- `{item.get('path', '?')}:{(item.get('start') or {}).get('line', '?')}` — "
+                               f"`{item.get('check_id', 'rule')}` — {message[:300]}")
+          if trivy_findings:
+              lines += ["", "### Trivy — high/critical findings"]
+              for target, kind, item in trivy_findings[:20]:
+                  ident = item.get("VulnerabilityID") or item.get("ID") or item.get("RuleID") or "finding"
+                  title = item.get("Title") or item.get("Message") or item.get("Description") or kind
+                  severity = str(item.get("Severity", "UNKNOWN")).upper()
+                  lines.append(f"- **{severity}** `{target}` — `{ident}` — {' '.join(str(title).split())[:300]}")
+          if not total and not scanner_errors:
+              lines += ["", "✅ No error-severity Semgrep findings or high/critical Trivy findings detected."]
+
+          enforce_after = os.environ.get("ENFORCE_AFTER", "")
+          lines += [
+              "",
+              f"> Observation mode until **{enforce_after}**. After that, unresolved blocking-severity findings fail the required gate.",
+              "",
+              f"[Open workflow run]({os.environ.get('GITHUB_SERVER_URL')}/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')})",
+          ]
+          summary = "\n".join(lines)
+          out = Path(os.environ["GITHUB_OUTPUT"])
+          with out.open("a") as fh:
+              fh.write(f"blocking_findings={total}\n")
+              fh.write(f"scan_ok={'false' if scanner_errors else 'true'}\n")
+              fh.write("summary<<HERMES_REVIEW_EOF\n")
+              fh.write(summary + "\n")
+              fh.write("HERMES_REVIEW_EOF\n")
+          Path("review-summary.md").write_text(summary + "\n")
+          PY
+
+      - name: Publish job summary
+        if: always()
+        run: cat review-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: Post or update PR summary
+    needs: scan
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Upsert review comment
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          REVIEW_BODY: ${{ needs.scan.outputs.summary }}
+        with:
+          script: |
+            const marker = '<!-- hermes-pr-security-review -->';
+            const body = process.env.REVIEW_BODY || `${marker}\n## 🔐 PR security & bug review\n\n⚠️ Scan did not return a summary.`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100
+            });
+            const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  security-gate:
+    name: Enforce high-severity security gate
+    needs: [scan, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Apply observation or enforcement policy
+        env:
+          BLOCKING_FINDINGS: ${{ needs.scan.outputs.blocking_findings }}
+          SCAN_OK: ${{ needs.scan.outputs.scan_ok }}
+          SCAN_JOB_RESULT: ${{ needs.scan.result }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import os
+          import sys
+
+          now = dt.datetime.now(dt.timezone.utc)
+          enforce_after = dt.datetime.fromisoformat(os.environ["ENFORCE_AFTER"].replace("Z", "+00:00"))
+          findings = int(os.environ.get("BLOCKING_FINDINGS") or 0)
+          scan_ok = os.environ.get("SCAN_OK") == "true" and os.environ.get("SCAN_JOB_RESULT") == "success"
+
+          if now < enforce_after:
+              print(f"Observation mode: {findings} blocking-severity finding(s); scan_ok={scan_ok}.")
+              sys.exit(0)
+          if not scan_ok:
+              print("Blocking: one or more scanners failed or returned an invalid report.")
+              sys.exit(1)
+          if findings:
+              print(f"Blocking: {findings} high-severity security/bug finding(s) require remediation.")
+              sys.exit(1)
+          print("Security gate passed: scanners healthy and no blocking-severity findings.")
+          PY
