@@ -1,4 +1,9 @@
 node_modules/
 storageState.json
-pdfs/
 .DS_Store
+
+# Keep the pdfs/ folder tree in git, but never commit the PDFs themselves
+pdfs/**
+!pdfs/
+!pdfs/**/
+!pdfs/**/.gitkeep
