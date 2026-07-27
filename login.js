@@ -27,4 +27,7 @@ const run = async () => {
   process.exit(0);
 };
 
-run();
+run().catch((err) => {
+  console.error(`✗ ${err.message}`);
+  process.exit(1);
+});

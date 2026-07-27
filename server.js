@@ -9,28 +9,41 @@ import { archive, sessionExists } from "./core.js";
 import { STORAGE_STATE, OUTPUT_BASE } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 4321;
+const PORT = Number(process.env.PORT) || 4321;
+const HOST = process.env.HOST || "127.0.0.1"; // local-only by default (holds auth session)
+const LOGIN_IDLE_MS = 15 * 60 * 1000; // close abandoned login browser after 15 min
 
 let jobRunning = false; // only one archive job at a time
 let loginCtx = null; // holds the headed browser/context between login steps
+let loginTimer = null;
+
+const clearLoginTimer = () => {
+  if (loginTimer) {
+    clearTimeout(loginTimer);
+    loginTimer = null;
+  }
+};
+
+const closeLogin = async () => {
+  clearLoginTimer();
+  if (!loginCtx) return;
+  const ctx = loginCtx;
+  loginCtx = null;
+  await ctx.browser.close().catch(() => {});
+};
+
+const armLoginTimer = () => {
+  clearLoginTimer();
+  loginTimer = setTimeout(() => {
+    console.log("Login browser idle timeout — closing.");
+    closeLogin().catch(() => {});
+  }, LOGIN_IDLE_MS);
+};
 
 const send = (res, status, body, type = "application/json") => {
   res.writeHead(status, { "Content-Type": type });
   res.end(typeof body === "string" ? body : JSON.stringify(body));
 };
-
-const readBody = (req) =>
-  new Promise((resolve) => {
-    let data = "";
-    req.on("data", (c) => (data += c));
-    req.on("end", () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch {
-        resolve({});
-      }
-    });
-  });
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -48,12 +61,13 @@ const server = http.createServer(async (req, res) => {
   // ── Login step 1: open a real browser at Substack's sign-in page ──
   if (req.method === "POST" && url.pathname === "/api/login/start") {
     try {
-      if (loginCtx) await loginCtx.browser.close().catch(() => {});
+      await closeLogin();
       const browser = await chromium.launch({ headless: false });
       const context = await browser.newContext();
       const page = await context.newPage();
       await page.goto("https://substack.com/sign-in", { waitUntil: "domcontentloaded" });
       loginCtx = { browser, context };
+      armLoginTimer();
       return send(res, 200, { ok: true });
     } catch (err) {
       return send(res, 500, { error: err.message });
@@ -64,6 +78,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/login/finish") {
     if (!loginCtx) return send(res, 400, { error: "Login was not started." });
     try {
+      clearLoginTimer();
       await loginCtx.context.storageState({ path: STORAGE_STATE });
       await loginCtx.browser.close().catch(() => {});
       loginCtx = null;
@@ -96,6 +111,15 @@ const server = http.createServer(async (req, res) => {
     const controller = new AbortController();
     req.on("close", () => controller.abort()); // browser closed/stopped → cancel
 
+    // Keepalive so proxies/browsers don't drop long quiet stretches (throttle gaps).
+    const ping = setInterval(() => {
+      try {
+        res.write(`: ping\n\n`);
+      } catch {
+        /* connection gone */
+      }
+    }, 15000);
+
     jobRunning = true;
     try {
       const summary = await archive({ publication, since, until }, (line) => event("log", line), controller.signal);
@@ -103,6 +127,7 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       event("error", err.message);
     } finally {
+      clearInterval(ping);
       jobRunning = false;
       res.end();
     }
@@ -112,9 +137,16 @@ const server = http.createServer(async (req, res) => {
   send(res, 404, { error: "Not found" });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`\n  Substack PDF Archiver dashboard`);
-  console.log(`  → http://localhost:${PORT}`);
+  console.log(`  → http://${HOST}:${PORT}`);
   console.log(`  PDFs save under ${OUTPUT_BASE}/<publication-host>/`);
   console.log(`  Press Ctrl-C to stop the server.\n`);
 });
+
+const shutdown = async () => {
+  await closeLogin();
+  server.close(() => process.exit(0));
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
