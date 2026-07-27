@@ -11,11 +11,17 @@ offline archival of publications **you have a paid subscription to**.
 
 ## Setup
 
+From the repo root (works from any clone path):
+
 ```bash
-cd ~/Downloads/CLAUDE/Code/substack-pdf-archiver
-npm install
-npx playwright install chromium
+cd "$(git rev-parse --show-toplevel)"
+npm run setup
 ```
+
+That installs dependencies and Playwright's Chromium browser. Requires Node.js 18+.
+
+For a fuller walkthrough on a new machine (login session + restoring `pdfs/`),
+see [`SETUP_MACMINI.md`](./SETUP_MACMINI.md).
 
 ## Dashboard (easiest)
 
@@ -23,7 +29,7 @@ npx playwright install chromium
 npm run dashboard
 ```
 
-Open <http://localhost:4321>. From there you can:
+Open <http://127.0.0.1:4321>. From there you can:
 
 1. **Connect Substack account** — opens a browser, you sign in, click “I'm
    signed in”. One login covers every publication you subscribe to.
@@ -81,6 +87,8 @@ below the date — fast even on huge archives. Dates are `YYYY-MM-DD`.
 ## Other behavior
 
 - **Pixel-perfect**: screen styling + backgrounds, scrolls to load lazy images.
+- **Paywall-aware**: aborts a post (and retries) if the page looks paywalled —
+  usually means the session expired; re-run `npm run login`.
 - **Throttled**: randomized 3–5s between posts.
 - **Resumable**: stop/restart anytime; re-run to retry failures.
 
@@ -93,4 +101,4 @@ range, and API page size.
 
 - Personal use only — don't redistribute paid content.
 - If PDFs start showing paywalls, your session expired — re-run `npm run login`.
-```
+- The dashboard binds to `127.0.0.1` only (override with `HOST` / `PORT` env vars).

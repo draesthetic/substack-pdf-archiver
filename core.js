@@ -28,6 +28,17 @@ const MAX_ATTEMPTS = 3;
 
 export const sessionExists = () => fs.existsSync(STORAGE_STATE);
 
+// Build Cookie header from Playwright storageState so the archive API sees the
+// same logged-in session as the headed browser (needed for pubs that hide the
+// archive from anonymous visitors).
+const cookieHeaderFromStorage = () => {
+  const state = JSON.parse(fs.readFileSync(STORAGE_STATE, "utf8"));
+  const cookies = (state.cookies || [])
+    .filter((c) => c.name && c.value != null)
+    .map((c) => `${c.name}=${c.value}`);
+  return cookies.join("; ");
+};
+
 // Load a post and print it to PDF. Throws on failure so the caller can retry.
 // We deliberately avoid waitUntil:"networkidle" — Substack pages keep firing
 // analytics/embed requests, so "idle" often never arrives. Instead we wait for
@@ -37,6 +48,28 @@ const renderPost = async (page, url, filepath) => {
   await page
     .waitForSelector("article, .available-content, .single-post, .post", { timeout: 30000 })
     .catch(() => {});
+
+  // Bail early if the session expired and we're staring at a paywall teaser.
+  const paywalled = await page.evaluate(() => {
+    const text = (document.body?.innerText || "").toLowerCase();
+    const markers = [
+      "this post is for paying subscribers",
+      "this post is for subscribers only",
+      "become a paid subscriber",
+      "upgrade to paid",
+    ];
+    if (markers.some((m) => text.includes(m))) {
+      // Full posts still mention upgrades in sidebars; require a short body.
+      const article = document.querySelector("article, .available-content, .single-post, .post");
+      const len = (article?.innerText || "").trim().length;
+      return len < 800;
+    }
+    return false;
+  });
+  if (paywalled) {
+    throw new Error("Paywall detected — session may have expired. Re-run npm run login.");
+  }
+
   await page.emulateMedia({ media: "screen" });
   await page.evaluate(async () => {
     await new Promise((resolve) => {
@@ -49,6 +82,21 @@ const renderPost = async (page, url, filepath) => {
       };
       step();
     });
+  });
+  // Give lazy-loaded images a chance to finish after the scroll pass.
+  await page.evaluate(async () => {
+    const imgs = [...document.images];
+    await Promise.all(
+      imgs.map(
+        (img) =>
+          img.complete ||
+          new Promise((resolve) => {
+            img.addEventListener("load", resolve, { once: true });
+            img.addEventListener("error", resolve, { once: true });
+            setTimeout(resolve, 5000);
+          }),
+      ),
+    );
   });
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForLoadState("load").catch(() => {});
@@ -65,10 +113,16 @@ const renderPost = async (page, url, filepath) => {
 // Walk the archive API page by page. Posts come newest-first, so when `since`
 // is set we can stop as soon as we cross below it instead of fetching everything.
 const fetchPosts = async (origin, { since, until }, log) => {
+  const cookie = cookieHeaderFromStorage();
   const posts = [];
   for (let offset = 0; ; offset += PAGE_SIZE) {
     const url = `${origin}/api/v1/archive?sort=new&offset=${offset}&limit=${PAGE_SIZE}`;
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+    });
     if (!res.ok) throw new Error(`Archive API ${res.status} at offset ${offset}`);
     const batch = await res.json();
     if (!Array.isArray(batch) || batch.length === 0) break;
@@ -147,6 +201,12 @@ export const archive = async ({ publication, since, until }, log, signal) => {
           break;
         } catch (err) {
           lastErr = err;
+          // Don't leave a half-written PDF behind on failure.
+          try {
+            if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+          } catch {
+            /* ignore */
+          }
           if (attempt < MAX_ATTEMPTS) {
             const backoff = attempt * 4000;
             log(`…retry ${attempt + 1}/${MAX_ATTEMPTS} in ${backoff / 1000}s  ${label}  — ${err.message.split("\n")[0]}`);
