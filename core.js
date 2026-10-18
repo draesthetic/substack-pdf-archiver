@@ -64,9 +64,11 @@ const renderPost = async (page, url, filepath) => {
 
 // Walk the archive API page by page. Posts come newest-first, so when `since`
 // is set we can stop as soon as we cross below it instead of fetching everything.
+// The API may return fewer than `limit` posts per page (vutr's first page is 23
+// of 50), so advance by what actually came back and only stop on an empty page.
 const fetchPosts = async (origin, { since, until }, log) => {
   const posts = [];
-  for (let offset = 0; ; offset += PAGE_SIZE) {
+  for (let offset = 0; ; ) {
     const url = `${origin}/api/v1/archive?sort=new&offset=${offset}&limit=${PAGE_SIZE}`;
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
     if (!res.ok) throw new Error(`Archive API ${res.status} at offset ${offset}`);
@@ -85,6 +87,7 @@ const fetchPosts = async (origin, { since, until }, log) => {
     }
     log(`  …scanned to ${(batch.at(-1).post_date || "").slice(0, 10)}, kept ${posts.length}`);
     if (crossedSince) break;
+    offset += batch.length;
     await sleep(500);
   }
   return posts;
