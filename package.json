@@ -4,7 +4,11 @@
   "private": true,
   "type": "module",
   "description": "Bulk-archive a Substack publication's posts as pixel-perfect PDFs (personal use).",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
+    "setup": "npm install && npx playwright install chromium",
     "login": "node login.js",
     "archive": "node archive.js",
     "dashboard": "node server.js"

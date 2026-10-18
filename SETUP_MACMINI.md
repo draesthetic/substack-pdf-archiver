@@ -17,16 +17,14 @@ cd "$(git rev-parse --show-toplevel)"
 
 `config.js` uses repo-relative paths (`OUTPUT_BASE = "./pdfs"`,
 `STORAGE_STATE = "./storageState.json"`), so as long as commands run from the
-repo root, the tool works wherever you clone it. (Ignore the hardcoded
-`cd ~/Downloads/...` line in `README.md` — it predates the move.)
+repo root, the tool works wherever you clone it.
 
 ## 1. Install
 
-Requires Node.js (recent LTS). One dependency, Playwright, plus its browser:
+Requires Node.js 18+. One dependency, Playwright, plus its browser:
 
 ```bash
-npm install
-npx playwright install chromium
+npm run setup          # npm install + Playwright Chromium
 ```
 
 ## 2. Log in to Substack (regenerates `storageState.json`)
@@ -55,7 +53,7 @@ Re-download each publication. The tool **skips already-downloaded posts** and is
 **resumable**, so this is safe to stop/restart. Requires an active paid
 subscription to each publication.
 ```bash
-npm run dashboard                       # http://localhost:4321 — paste pub URLs, click Download
+npm run dashboard                       # http://127.0.0.1:4321 — paste pub URLs, click Download
 # or CLI, per publication:
 node archive.js thewolfofharcourtstreet
 node archive.js michaeljburry
@@ -85,7 +83,7 @@ fetching genuinely new posts.
 ## 4. Run
 
 ```bash
-npm run dashboard      # http://localhost:4321  (easiest — GUI)
+npm run dashboard      # http://127.0.0.1:4321  (easiest — GUI)
 # or
 npm run archive        # CLI, uses default publication in config.js
 ```
