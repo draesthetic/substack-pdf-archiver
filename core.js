@@ -23,9 +23,11 @@ const jitter = () =>
 // The control-char range (\x00–\x1F plus DEL) matters: some post titles carry a
 // stray control character — e.g. "GroupBy #\b44…" has a backspace — which
 // Windows forbids in a filename and which otherwise fails the write with ENOENT.
+// \t \n \v \f \r (\x09–\x0D) are left out of the strip so the \s+ collapse
+// turns them into spaces ("Part 1\nIntro" → "Part 1 Intro", not "Part 1Intro").
 const sanitize = (title) =>
   title
-    .replace(/[/\\:*?"<>|\x00-\x1F\x7F]/g, "")
+    .replace(/[/\\:*?"<>|\x00-\x08\x0E-\x1F\x7F]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -202,9 +204,11 @@ export const archive = async ({ publication, since, until }, log, signal) => {
       const date = post.post_date ? post.post_date.slice(0, 10) : "0000-00-00";
       // Truncate the title so the whole "YYYY-MM-DD – Title.pdf" filename stays
       // within MAX_FILENAME_LENGTH chars (the date prefix and .pdf are kept).
+      // A cut through an emoji leaves a lone high surrogate; drop it.
       const titleBudget = MAX_FILENAME_LENGTH - `${date} – .pdf`.length;
       const title = sanitize(post.title || post.slug || `post-${post.id}`)
         .slice(0, Math.max(0, titleBudget))
+        .replace(/[\uD800-\uDBFF]$/, "")
         .trim();
       const filename = `${date} – ${title}.pdf`;
       const filepath = path.join(outputDir, filename);
