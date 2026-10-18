@@ -16,3 +16,8 @@ export const THROTTLE_MAX_MS = 5000;
 
 // How many posts the archive API returns per page request.
 export const PAGE_SIZE = 50;
+
+// Cap the generated PDF filename ("YYYY-MM-DD – Title.pdf") at this many
+// characters. Long post titles are truncated to fit; the date prefix and the
+// .pdf extension are always kept.
+export const MAX_FILENAME_LENGTH = 150;

@@ -10,6 +10,7 @@ import {
   THROTTLE_MIN_MS,
   THROTTLE_MAX_MS,
   PAGE_SIZE,
+  MAX_FILENAME_LENGTH,
 } from "./config.js";
 import { normalizePublication } from "./lib.js";
 
@@ -17,12 +18,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = () =>
   THROTTLE_MIN_MS + Math.floor(Math.random() * (THROTTLE_MAX_MS - THROTTLE_MIN_MS + 1));
 
+// Strip filesystem-illegal characters and collapse whitespace. Length is
+// capped later (per filename), once the date prefix and extension are known.
+// The control-char range (\x00–\x1F plus DEL) matters: some post titles carry a
+// stray control character — e.g. "GroupBy #\b44…" has a backspace — which
+// Windows forbids in a filename and which otherwise fails the write with ENOENT.
 const sanitize = (title) =>
   title
-    .replace(/[/\\:*?"<>|]/g, "")
+    .replace(/[/\\:*?"<>|\x00-\x1F\x7F]/g, "")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 180);
+    .trim();
 
 const MAX_ATTEMPTS = 3;
 
@@ -195,7 +200,12 @@ export const archive = async ({ publication, since, until }, log, signal) => {
         break;
       }
       const date = post.post_date ? post.post_date.slice(0, 10) : "0000-00-00";
-      const title = sanitize(post.title || post.slug || `post-${post.id}`);
+      // Truncate the title so the whole "YYYY-MM-DD – Title.pdf" filename stays
+      // within MAX_FILENAME_LENGTH chars (the date prefix and .pdf are kept).
+      const titleBudget = MAX_FILENAME_LENGTH - `${date} – .pdf`.length;
+      const title = sanitize(post.title || post.slug || `post-${post.id}`)
+        .slice(0, Math.max(0, titleBudget))
+        .trim();
       const filename = `${date} – ${title}.pdf`;
       const filepath = path.join(outputDir, filename);
       const label = `[${i + 1}/${posts.length}] ${filename}`;
