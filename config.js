@@ -14,8 +14,9 @@ export const STORAGE_STATE = "./storageState.json";
 export const THROTTLE_MIN_MS = 3000;
 export const THROTTLE_MAX_MS = 5000;
 
-// How many posts the archive API returns per page request.
-export const PAGE_SIZE = 50;
+// How many posts the archive API returns per page request. Substack rejects
+// anything above 25 with a 400.
+export const PAGE_SIZE = 25;
 
 // Cap the generated PDF filename ("YYYY-MM-DD – Title.pdf") at this many
 // characters. Long post titles are truncated to fit; the date prefix and the

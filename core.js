@@ -139,14 +139,28 @@ const renderPost = async (page, url, filepath) => {
 
 // Walk the archive API page by page. Posts come newest-first, so when `since`
 // is set we can stop as soon as we cross below it instead of fetching everything.
+// The API is cursor-paginated: each response is { posts, nextCursor }, and the
+// next page is requested with ?cursor=<nextCursor>; nextCursor is null at the
+// end. (It used to take ?offset= and return a bare array — offset is now a 400.)
 const fetchPosts = async (origin, { since, until }, log) => {
   const posts = [];
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const url = `${origin}/api/v1/archive?sort=new&offset=${offset}&limit=${PAGE_SIZE}`;
+  let cursor = null;
+  do {
+    const url =
+      `${origin}/api/v1/archive?sort=new&limit=${PAGE_SIZE}` +
+      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (!res.ok) throw new Error(`Archive API ${res.status} at offset ${offset}`);
-    const batch = await res.json();
-    if (!Array.isArray(batch) || batch.length === 0) break;
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => "")).slice(0, 200);
+      throw new Error(`Archive API ${res.status}${detail ? `: ${detail}` : ""}`);
+    }
+    const body = await res.json();
+    if (!Array.isArray(body?.posts)) {
+      throw new Error("Archive API returned an unexpected response shape (no `posts` array).");
+    }
+    const batch = body.posts;
+    cursor = body.nextCursor || null;
+    if (batch.length === 0) break;
 
     let crossedSince = false;
     for (const post of batch) {
@@ -160,8 +174,8 @@ const fetchPosts = async (origin, { since, until }, log) => {
     }
     log(`  …scanned to ${(batch.at(-1).post_date || "").slice(0, 10)}, kept ${posts.length}`);
     if (crossedSince) break;
-    await sleep(500);
-  }
+    if (cursor) await sleep(500);
+  } while (cursor);
   return posts;
 };
 
